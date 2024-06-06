@@ -1,13 +1,15 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# In[20]:
 from matplotlib import pyplot as plt
 from collections import deque
 import numpy as np
 
 import gymnasium as gym
-import highway_env
+import highway_env 
+import casadi as ca
+import time
+
 
 
 config =     {
@@ -34,190 +36,71 @@ config =     {
     "simulation_frequency": 5,  # [Hz]
     "policy_frequency": 5,  # [Hz]
      'vehicles_count':  0,
-     'reward_speed_range': [20, 80],
-    #  'other_vehicles_type': 'highway_env.vehicle.behavior.LinearVehicle',
+     'reward_speed_range': [0, 20],
     'controlled_vehicles': 3,
     }
-env = gym.make('highway-v0', render_mode='rgb_array')
-
-
-
-# # 比例控制
-
-# In[21]:
-
+env = gym.make('highway-v0')
 env.configure(config)
 env.reset()
 
-env.road.vehicles[0].speed=0
-env.road.vehicles[0].position=[0,12]
-env.road.vehicles[1].speed=10
-env.road.vehicles[1].position=[20,8]
-env.road.vehicles[2].speed=10
-env.road.vehicles[2].position=[20,12]
+ego_car = env.road.vehicles[0]
+ego_car.speed=0
+ego_car.position=[5,12]
 
-ego_x_his1=[0]
-ego_v_his1=[0]
-prcd_x_his1=[20]
-prcd_y_his1=[]
-prcd_v_his1=[10]
+tractor = env.road.vehicles[1]
+tractor.color = (200,50,20)
+tractor.speed=10
+tractor.position=[20,8]
 
-his_u1=[]
-
-u=0
-dt=1/5
-for i in range(1000):   
-
-    action = [u,0]
-    obs, reward, done, truncated, info = env.step(action)
-    
-    ego_vehicle=env.road.vehicles[0]
-    prcd_vehicle=env.road.vehicles[1]
-    
-    ego_v=ego_vehicle.speed
-    ego_x=ego_vehicle.position[0]
-    
-    prcd_v=prcd_vehicle.speed
-    prcd_x=prcd_vehicle.position[0]
-    
-    ego_v_his1.append(ego_v)
-    ego_x_his1.append(ego_x)
-    prcd_v_his1.append(prcd_v)
-    prcd_x_his1.append(prcd_x) 
-    
-    dx=prcd_x-ego_x
-    dv=prcd_v-ego_v
-    
-    u=1/10*(dx-50+dv)
-    
-    his_u1.append(u)
-    env.render()
-    if info['crashed']==True:
-        break
-env.close()
-
-
-# # PID
-
-# In[23]:
-
-
-env.configure(config)
-env.reset()
-
-env.road.vehicles[0].speed=0
-env.road.vehicles[0].position=[0,12]
-env.road.vehicles[1].speed=10
-env.road.vehicles[1].position=[20,8]
-env.road.vehicles[2].speed=10
-env.road.vehicles[2].position=[20,12]
+blue_car = env.road.vehicles[2]
+blue_car.speed=10
+blue_car.position=[20,12]
+blue_car.color = (0,128,255)
 
 
 
-ego_x_his2=[0]
-ego_v_his2=[0]
-prcd_x_his2=[20]
-prcd_y_his2=[]
-prcd_v_his2=[10]
-
-his_u2=[]
-buffer1 = deque(maxlen=10)
-buffer2 = deque(maxlen=10)
-
-u=0
-dt=1/5
-for _ in range(1000):   
-    
-    action = [u,0]
-    obs, reward, done, truncated, info = env.step(action)
-    
-    ego_vehicle=env.road.vehicles[0]
-    prcd_vehicle=env.road.vehicles[1]
-    
-    ego_v=ego_vehicle.speed
-    ego_x=ego_vehicle.position[0]
-    
-    prcd_v=prcd_vehicle.speed
-    prcd_x=prcd_vehicle.position[0]
-    
-    ego_v_his2.append(ego_v)
-    ego_x_his2.append(ego_x)
-    prcd_v_his2.append(prcd_v)
-    prcd_x_his2.append(prcd_x) 
-    
-    ep_x=prcd_x-ego_x-20
-    buffer1.append(ep_x)
-    ei_x=np.sum(buffer1)*dt  
-    if len(buffer1)>=2:        
-        ed_x=(buffer1[-1]-buffer1[-2])/dt
-    else:
-        ed_x=0     
-    e_x=(1*ep_x+0.2*ei_x+0.1*ed_x)
-    
-    ep_v=prcd_v-ego_v
-    
-    buffer2.append(ep_v)
-    ei_v=np.sum(buffer2)*dt    
-    if len(buffer2)>=2:        
-        ed_v=(buffer2[-1]-buffer2[-2])/dt
-    else:
-        ed_v=0        
-    e_v=(1*ep_v+0.2*ei_v+0.1*ed_v)
-    
-    
-    u=max(min(e_x+e_v,5),-5)
-    
-    his_u2.append(u)
-    env.render()
-    if info['crashed']==True:
-        break
-env.close()
 
 
-# # MPC
+def mpc_controller(yr, xr, dv, dy, dx, N, dt):
+    v_ = dv
+    x_ = dx  
 
-# In[24]:
+    obj = 0  
+    w1 = 0.5
+    w2 = 1 - w1
+    weight = [w1, w2]
+
+    # Create optimization problem
+    opti = ca.Opti()
+    u = opti.variable(N)  # Control inputs
+    y_pred = opti.variable(N)  # Predicted outputs
+
+    # Initialize the first predicted output
+    opti.subject_to(y_pred[0] == dy)
+
+    for step in range(1, N):
+        # Update the predicted velocity and distance for the next step
+        v_ = v_ - u[step - 1] * dt
+        x_ = x_ + v_ * dt
+        y_pred[step] = y_pred[step - 1] + v_ * dt
+        # Update the objective function
+        obj += weight[0] * ((y_pred[step] - yr) ** 2) + weight[1] * (u[step - 1] ** 2)
+        # Add a penalty if y_pred is less than yr
+        
+    opti.minimize(obj)
+    # Constraint to ensure y_pred >= yr
+    # Solver settings
+    opti.solver('ipopt')
+    try:
+        sol = opti.solve()
+        u_opt = sol.value(u)
+        print(u_opt[0])
+        return u_opt[0]
+    except Exception as e:
+        print("Solver failed:", e)
+        return None
 
 
-import casadi as ca
-
-
-def mpc_controller(xr,dv,dx,N,dt):
-    u = ca.MX.sym('u',N) #控制量，未来N个时刻
-    v_= dv
-    x_= dx #当前时刻的距离差
-
-    obj= 0  #优化函数
-    w1=0.7
-    w2=1-w1
-    weight=[w1,w2]
-
-    #预测
-    for step in range(0,N,1):        
-        v_=v_-u[step]*dt
-        x_=x_+v_*dt  #模型       
-        obj=obj+weight[0]*(x_-xr)**2+weight[1]*u[step]**2
-
-    nlp = {'x': u, 'f': obj}
-
-    solver = ca.nlpsol('solver','ipopt', nlp)    
-    solution = solver(x0=0,lbx=-5,ubx=5)
-    u=solution['x'].full()[0][0]
-    return u
-
-
-# In[26]:
-
-
-env.configure(config)
-env.reset()
-
-env.road.vehicles[0].speed=0
-env.road.vehicles[0].position=[0,12]
-env.road.vehicles[1].speed=10
-env.road.vehicles[1].position=[20,8]
-env.road.vehicles[2].speed=10
-env.road.vehicles[2].position=[20,12]
 
 
 
@@ -226,79 +109,79 @@ ego_v_his3=[0]
 prcd_x_his3=[20]
 prcd_y_his3=[]
 prcd_v_his3=[10]
-
+u=0
+dt=1/2
 his_u3=[]
 
-u=0
+for i in range(200):
+    if i==0:
+        env.road.vehicles[2].speed=12
 
-for _ in range(1000):
     action = [u,0]
     obs, reward, done, truncated, info = env.step(action)
     
-    ego_vehicle=env.road.vehicles[0]
-    prcd_vehicle=env.road.vehicles[1]
-    
-    ego_v=ego_vehicle.speed
-    ego_x=ego_vehicle.position[0]
-    
-    prcd_v=prcd_vehicle.speed
-    prcd_x=prcd_vehicle.position[0]
-    
+    ego_v=ego_car.speed
+    tractor_v=tractor.speed
+    ego_x=ego_car.position[0]
+    ego_y=ego_car.position[1]
+
+    prcd_v=blue_car.speed
+    prcd_x=blue_car.position[0]
+    prcd_y=tractor.position[0]
+
     ego_v_his3.append(ego_v)
     ego_x_his3.append(ego_x)
     prcd_v_his3.append(prcd_v)
     prcd_x_his3.append(prcd_x)
     
     dx=prcd_x-ego_x
-    dv=prcd_v-ego_v
+    dy=prcd_y-ego_x
+
+    dv=tractor_v-ego_v
         
-    u=mpc_controller(50,dv,dx,20,dt)
-    
+    u=mpc_controller(0,50,dv,dy,dx,10,dt)
+
     his_u3.append(u)
     env.render()
     if info['crashed']==True:
         break
 env.close()
-
-# In[28]:
-
-
-plt.figure(figsize=(8,6))
-plt.title('车速对比')
-#plt.plot(np.transpose(prcd_v_his2))
-plt.plot(np.transpose(ego_v_his1))
-plt.plot(np.transpose(ego_v_his2))
-plt.plot(np.transpose(ego_v_his3))
-plt.xlabel('时间 - s')
-plt.ylabel('速度 - m/s')
-plt.legend(['K','PID','MPC'])
+print(obs)
 
 
-# In[29]:
+# Create a figure with 3 subplots arranged in 1 row and 3 columns
+fig, axs = plt.subplots(1, 3, figsize=(18, 6))
 
+# Speed plot
+axs[0].set_title('Speed')
+axs[0].plot(np.transpose(ego_v_his3))  # .T is shorthand for np.transpose
+axs[0].set_xlabel('Time (s)')
+axs[0].set_ylabel('Speed (m/s)')
+axs[0].legend(['MPC'])
 
-plt.figure(figsize=(8,6))
-plt.title('与前车距离对比')
-plt.plot(np.transpose(prcd_x_his1)-np.transpose(ego_x_his1))
-plt.plot(np.transpose(prcd_x_his2)-np.transpose(ego_x_his2))
-plt.plot(np.transpose(prcd_x_his3)-np.transpose(ego_x_his3))
-plt.ylim([0,40])
-plt.xlabel('时间 - s')
-plt.ylabel('与前车距离 - m')
-plt.legend(['K','PID','MPC'])
+# Distance plot
+axs[1].set_title('Distance')
+axs[1].plot(np.transpose(prcd_x_his3) - np.transpose(ego_x_his3))  # .T is shorthand for np.transpose
+axs[1].set_ylim([0, 40])
+axs[1].set_xlabel('Time (s)')
+axs[1].set_ylabel('Distance (m)')
+axs[1].legend(['MPC'])
 
+# Acceleration plot
+axs[2].set_title('Acceleration')
+axs[2].plot(np.transpose(his_u3))  # .T is shorthand for np.transpose
+axs[2].set_xlabel('Time (s)')
+axs[2].set_ylabel('Acceleration (m/s²)')
+axs[2].legend(['MPC'])
 
-# In[30]:
+# Adjust layout
+plt.tight_layout()
 
-
-plt.figure(figsize=(8,6))
-plt.title('控制量（加速度）对比')
-plt.plot(np.transpose(his_u1))
-plt.plot(np.transpose(his_u2))
-plt.plot(np.transpose(his_u3))
-plt.xlabel('时间 - s')
-plt.ylabel('加速度 - m/s^2')
-plt.legend(['比例控制','PID','MPC'])
-
-# In[ ]:
+# Show the combined figure
 plt.show()
+
+ego_car.speed = 5
+print(ego_car.step(0))
+print(ego_car.position)
+print(ego_car.step(10))
+print(ego_car.position)
